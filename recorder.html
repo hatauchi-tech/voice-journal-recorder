@@ -94,7 +94,6 @@
       return;
     }
     const durationSec = Math.max(.001, ((stoppedTick || performance.now()) - startTick) / 1000);
-    console.log('録音完了: blob.size=' + blob.size + ' mimeType=' + mimeType + ' durationSec=' + durationSec); // 調査用
     window.opener.postMessage({
       type: 'voiceJournalRecording', version: 1,
       blob: blob, mimeType: mimeType,
