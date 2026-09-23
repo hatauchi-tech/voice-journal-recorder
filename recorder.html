@@ -15,6 +15,7 @@
   #timer {font-size:32px; font-weight:300; font-variant-numeric:tabular-nums; margin:10px 0}
   #status {margin:16px 0; font-size:14px; color:var(--muted); white-space:pre-line; overflow-wrap:anywhere}
   #status.error {color:var(--red)}
+  #downloadLink {display:inline-block; margin-top:8px; font-size:14px; color:var(--ink)}
 </style>
 </head>
 <body>
@@ -23,6 +24,7 @@
   <button id="recordBtn" type="button" disabled>録音開始</button>
   <p id="timer">00:00</p>
   <p id="status">確認しています…</p>
+  <a id="downloadLink" hidden>音声を端末に保存</a>
 </main>
 <script>
   const params = new URLSearchParams(location.search);
@@ -30,12 +32,19 @@
   const maxAudioBytes = Number(params.get('maxAudioBytes')) || 14 * 1024 * 1024;
   const maxDurationSec = Number(params.get('maxDurationSec')) || 3600;
   const chunkSize = Number(params.get('chunkSize')) || 2 * 1024 * 1024;
-  // GAS Webアプリの実測オリジン形式(2026-09-23確認)。将来形式が変わった場合はstatusにそのまま表示され
-  // 診断できるようにしている(黙って失敗させない)。
-  const ALLOWED_ORIGIN_PATTERN = /^https:\/\/(script\.google\.com|n-[a-z0-9-]+-script\.googleusercontent\.com)$/;
+  const ACK_TIMEOUT_MS = 8000;
+  // GAS WebアプリのHtmlServiceコンテンツはApps Scriptがスクリプトごとに割り当てるサンドボックス
+  // ドメイン(n-<hash>-script.googleusercontent.com)のiframe内で動く。ここを正規表現で広く許可すると
+  // 「畑内さんのアプリ」ではなく「任意のGAS Webアプリ」を送信先として許可してしまい、攻撃者が自分の
+  // GASアプリのoriginを渡してこのページを開けば録音を横取りできる(2026-09-23 セキュリティレビュー指摘)。
+  // そのため実測済みのオリジンだけを列挙する完全一致リストにしている。
+  const ALLOWED_ORIGINS = [
+    'https://n-wqe27nxp7okg5q2gwad4purjpsgiuqqv5xu4xtq-0lu-script.googleusercontent.com' // 検証用GAS(15bMtbix…)で実測(2026-09-18)
+  ];
 
-  const ui = {recordBtn: document.getElementById('recordBtn'), timer: document.getElementById('timer'), status: document.getElementById('status')};
+  const ui = {recordBtn: document.getElementById('recordBtn'), timer: document.getElementById('timer'), status: document.getElementById('status'), downloadLink: document.getElementById('downloadLink')};
   let mediaRecorder, audioChunks = [], stream, startTime, startTick, stoppedTick, timerInterval, receivedBytes = 0;
+  let hasUnsentAudio = false;
 
   function showStatus(text, error) {
     ui.status.textContent = text;
@@ -84,7 +93,34 @@
     mediaRecorder.stop();
   }
 
-  function processRecording() {
+  function offerDownload(blob, mimeType, recordedAt, message) {
+    const extension = {'audio/webm':'webm','audio/mp4':'m4a','audio/ogg':'ogg'}[mimeType] || 'audio';
+    const url = URL.createObjectURL(blob);
+    ui.downloadLink.href = url;
+    ui.downloadLink.download = '日記_' + recordedAt.replace(/[:.]/g,'-') + '.' + extension;
+    ui.downloadLink.hidden = false;
+    ui.downloadLink.addEventListener('click', () => {hasUnsentAudio = false;}, {once: true});
+    showStatus(message, true);
+  }
+
+  function waitForAck() {
+    return new Promise(resolve => {
+      function onAck(event) {
+        if (event.origin !== targetOrigin || event.source !== window.opener) return;
+        if (!event.data || event.data.type !== 'voiceJournalRecordingAck' || event.data.version !== 1) return;
+        window.removeEventListener('message', onAck);
+        clearTimeout(timer);
+        resolve(true);
+      }
+      window.addEventListener('message', onAck);
+      const timer = setTimeout(() => {
+        window.removeEventListener('message', onAck);
+        resolve(false);
+      }, ACK_TIMEOUT_MS);
+    });
+  }
+
+  async function processRecording() {
     clearInterval(timerInterval); stopTracks();
     const mimeType = mediaRecorder.mimeType.split(';')[0];
     const blob = new Blob(audioChunks, {type: mimeType}); audioChunks = [];
@@ -94,27 +130,41 @@
       return;
     }
     const durationSec = Math.max(.001, ((stoppedTick || performance.now()) - startTick) / 1000);
+    const recordedAt = new Date(startTime).toISOString();
+    hasUnsentAudio = true;
+    if (!window.opener || window.opener.closed) {
+      offerDownload(blob, mimeType, recordedAt, '元の画面と接続できません。下のリンクから音声を端末に保存してください。');
+      return;
+    }
     window.opener.postMessage({
       type: 'voiceJournalRecording', version: 1,
       blob: blob, mimeType: mimeType,
-      recordedAt: new Date(startTime).toISOString(),
+      recordedAt: recordedAt,
       durationSec: durationSec
     }, targetOrigin);
-    showStatus('送信しました。このウィンドウを閉じます…');
-    ui.recordBtn.hidden = true;
-    setTimeout(() => window.close(), 800);
+    showStatus('送信しています…');
+    const acknowledged = await waitForAck();
+    if (acknowledged) {
+      hasUnsentAudio = false;
+      showStatus('送信しました。このウィンドウを閉じます…');
+      ui.recordBtn.hidden = true;
+      setTimeout(() => window.close(), 800);
+    } else {
+      offerDownload(blob, mimeType, recordedAt, '元の画面に届いたか確認できませんでした。念のため下のリンクから音声を端末に保存してください。');
+    }
   }
 
   if (!window.opener) {
     showStatus('録音元の画面と接続できません。音声ジャーナルの画面から開き直してください。', true);
-  } else if (!ALLOWED_ORIGIN_PATTERN.test(targetOrigin)) {
-    showStatus('不正なアクセス元のため利用できません: ' + targetOrigin, true);
+  } else if (!ALLOWED_ORIGINS.includes(targetOrigin)) {
+    console.warn('許可されていないorigin: ' + targetOrigin);
+    showStatus('このページは音声ジャーナルの画面からのみ利用できます。音声ジャーナルの画面から開き直してください。', true);
   } else {
     ui.recordBtn.disabled = false;
     showStatus('タップして録音開始');
     ui.recordBtn.addEventListener('click', () => mediaRecorder && mediaRecorder.state === 'recording' ? stopRecording() : startRecording());
   }
-  window.addEventListener('beforeunload', event => {if (mediaRecorder && mediaRecorder.state === 'recording') {event.preventDefault(); event.returnValue = '';}});
+  window.addEventListener('beforeunload', event => {if ((mediaRecorder && mediaRecorder.state === 'recording') || hasUnsentAudio) {event.preventDefault(); event.returnValue = '';}});
 </script>
 </body>
 </html>
