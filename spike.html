@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="ja"><body>
+<h1>マイク疎通テスト(スパイク)</h1>
+<p id="status">未実行</p>
+<script>
+navigator.mediaDevices.getUserMedia({audio: true}).then(stream => {
+  document.getElementById('status').textContent = '成功: マイクにアクセスできました';
+  stream.getTracks().forEach(track => track.stop());
+}).catch(error => {
+  document.getElementById('status').textContent = '失敗: ' + error.name + ': ' + error.message;
+});
+</script>
+</body></html>
