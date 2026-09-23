@@ -12,13 +12,18 @@ navigator.mediaDevices.getUserMedia({audio: true}).then(stream => {
 });
 
 // 調査用: window.openerがCOOP等でnullになっていないか、実際にpostMessageが親に届くかを確認する。
-// (本実装ではtargetOriginを'*'にはしない。これは検証専用)
+// GAS側から渡されたoriginパラメータを検証してからtargetOriginとして使う
+// (任意のリンク経由でこのページが音声データ送信先として悪用されるのを防ぐ)。
 const openerEl = document.getElementById('openerStatus');
+const targetOrigin = new URLSearchParams(location.search).get('origin') || '';
+const ALLOWED_ORIGIN_PATTERN = /^https:\/\/(script\.google\.com|[a-z0-9-]+\.script\.googleusercontent\.com)$/;
 if (!window.opener) {
   openerEl.textContent = 'window.opener = null(親ウィンドウへ戻せません)';
+} else if (!ALLOWED_ORIGIN_PATTERN.test(targetOrigin)) {
+  openerEl.textContent = '不正なアクセス元のためメッセージを送信しません: ' + targetOrigin;
 } else {
   openerEl.textContent = 'window.opener あり。postMessageを送信しました(親画面のstatusMessageを確認してください)';
-  window.opener.postMessage({type: 'spikeTestMessage', message: 'ポップアップからのテストメッセージです'}, '*');
+  window.opener.postMessage({type: 'spikeTestMessage', message: 'ポップアップからのテストメッセージです'}, targetOrigin);
 }
 </script>
 </body></html>
