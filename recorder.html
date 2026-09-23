@@ -103,19 +103,24 @@
     showStatus(message, true);
   }
 
+  // ACKの待ち受けリスナーはページ読み込み時に一度だけ登録する(waitForAckのタイムアウト後も
+  // 外さない)。iPhone等、送信先タブがバックグラウンドにあるとACKが8秒を過ぎて届くことがあり、
+  // その場合に無視すると「実際は保存済みなのに失敗した」と利用者に誤解させてしまうため
+  // (2026-09-23 セキュリティレビュー指摘)。遅れて届いた場合はonLateAckで画面を更新する。
+  let ackWaiter = null;
+  let onLateAck = null;
+  window.addEventListener('message', event => {
+    if (event.origin !== targetOrigin || event.source !== window.opener) return;
+    if (!event.data || event.data.type !== 'voiceJournalRecordingAck' || event.data.version !== 1) return;
+    if (ackWaiter) {const resolve = ackWaiter; ackWaiter = null; resolve(true); return;}
+    if (onLateAck) onLateAck();
+  });
+
   function waitForAck() {
     return new Promise(resolve => {
-      function onAck(event) {
-        if (event.origin !== targetOrigin || event.source !== window.opener) return;
-        if (!event.data || event.data.type !== 'voiceJournalRecordingAck' || event.data.version !== 1) return;
-        window.removeEventListener('message', onAck);
-        clearTimeout(timer);
-        resolve(true);
-      }
-      window.addEventListener('message', onAck);
-      const timer = setTimeout(() => {
-        window.removeEventListener('message', onAck);
-        resolve(false);
+      ackWaiter = resolve;
+      setTimeout(() => {
+        if (ackWaiter === resolve) {ackWaiter = null; resolve(false);}
       }, ACK_TIMEOUT_MS);
     });
   }
@@ -151,6 +156,13 @@
       setTimeout(() => window.close(), 800);
     } else {
       offerDownload(blob, mimeType, recordedAt, '元の画面に届いたか確認できませんでした。念のため下のリンクから音声を端末に保存してください。');
+      // タイムアウト後も届いたACKは見ている。実際には保存済みだった場合に案内を更新する。
+      onLateAck = () => {
+        onLateAck = null; hasUnsentAudio = false;
+        ui.downloadLink.hidden = true;
+        showStatus('送信が完了していました。このウィンドウを閉じてください。');
+        ui.recordBtn.hidden = true;
+      };
     }
   }
 
