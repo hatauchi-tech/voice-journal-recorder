@@ -16,7 +16,9 @@ navigator.mediaDevices.getUserMedia({audio: true}).then(stream => {
 // (任意のリンク経由でこのページが音声データ送信先として悪用されるのを防ぐ)。
 const openerEl = document.getElementById('openerStatus');
 const targetOrigin = new URLSearchParams(location.search).get('origin') || '';
-const ALLOWED_ORIGIN_PATTERN = /^https:\/\/(script\.google\.com|[a-z0-9-]+\.script\.googleusercontent\.com)$/;
+// 実測(2026-09-23): GAS Webアプリのオリジンは https://n-<ランダム>-script.googleusercontent.com という形式
+// (「script」はドット区切りの独立したサブドメインではなく、サブドメイン名の末尾にハイフン結合されている)。
+const ALLOWED_ORIGIN_PATTERN = /^https:\/\/(script\.google\.com|[a-z0-9.-]+\.googleusercontent\.com)$/;
 if (!window.opener) {
   openerEl.textContent = 'window.opener = null(親ウィンドウへ戻せません)';
 } else if (!ALLOWED_ORIGIN_PATTERN.test(targetOrigin)) {
