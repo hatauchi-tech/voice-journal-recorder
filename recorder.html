@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>音声ジャーナル 録音</title>
+<style>
+  :root {color-scheme:light; --ink:#213b34; --muted:#63766d; --paper:#faf8f2; --line:#dce2d9; --red:#b44534}
+  * {box-sizing:border-box}
+  body {margin:0; background:var(--paper); color:var(--ink); font:16px/1.75 system-ui,-apple-system,"Yu Gothic",sans-serif}
+  main {max-width:420px; margin:0 auto; padding:40px 24px; text-align:center}
+  #recordBtn {display:grid; place-items:center; margin:20px auto; width:104px; height:104px; border:0; border-radius:50%; background:var(--ink); color:white; font-size:14px; box-shadow:0 6px 20px #203d3620; cursor:pointer}
+  #recordBtn:disabled {opacity:.45; cursor:default}
+  #recordBtn.recording {background:var(--red)}
+  #timer {font-size:32px; font-weight:300; font-variant-numeric:tabular-nums; margin:10px 0}
+  #status {margin:16px 0; font-size:14px; color:var(--muted); white-space:pre-line; overflow-wrap:anywhere}
+  #status.error {color:var(--red)}
+</style>
+</head>
+<body>
+<main>
+  <h1>録音</h1>
+  <button id="recordBtn" type="button" disabled>録音開始</button>
+  <p id="timer">00:00</p>
+  <p id="status">確認しています…</p>
+</main>
+<script>
+  const params = new URLSearchParams(location.search);
+  const targetOrigin = params.get('origin') || '';
+  const maxAudioBytes = Number(params.get('maxAudioBytes')) || 14 * 1024 * 1024;
+  const maxDurationSec = Number(params.get('maxDurationSec')) || 3600;
+  const chunkSize = Number(params.get('chunkSize')) || 2 * 1024 * 1024;
+  // GAS Webアプリの実測オリジン形式(2026-09-23確認)。将来形式が変わった場合はstatusにそのまま表示され
+  // 診断できるようにしている(黙って失敗させない)。
+  const ALLOWED_ORIGIN_PATTERN = /^https:\/\/(script\.google\.com|n-[a-z0-9]+-script\.googleusercontent\.com)$/;
+
+  const ui = {recordBtn: document.getElementById('recordBtn'), timer: document.getElementById('timer'), status: document.getElementById('status')};
+  let mediaRecorder, audioChunks = [], stream, startTime, startTick, stoppedTick, timerInterval, receivedBytes = 0;
+
+  function showStatus(text, error) {
+    ui.status.textContent = text;
+    ui.status.classList.toggle('error', !!error);
+  }
+
+  function stopTracks() { if (stream) stream.getTracks().forEach(track => track.stop()); stream = null; }
+
+  async function startRecording() {
+    ui.recordBtn.disabled = true;
+    try {
+      if (!navigator.mediaDevices || !window.MediaRecorder) throw new Error('このブラウザは録音に対応していません。SafariまたはChromeで開いてください。');
+      stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      const mimeType = ['audio/webm;codecs=opus','audio/mp4','audio/ogg;codecs=opus'].find(type => MediaRecorder.isTypeSupported(type));
+      if (!mimeType) throw new Error('対応する録音形式が見つかりません。');
+      mediaRecorder = new MediaRecorder(stream, {mimeType: mimeType, audioBitsPerSecond: 64000});
+      audioChunks = []; receivedBytes = 0;
+      mediaRecorder.ondataavailable = event => {
+        if (event.data.size > 0) {audioChunks.push(event.data); receivedBytes += event.data.size;}
+        if (receivedBytes >= maxAudioBytes - chunkSize && mediaRecorder.state === 'recording') stopRecording();
+      };
+      mediaRecorder.onerror = () => {showStatus('録音が中断しました。',true); if (mediaRecorder.state === 'recording') stopRecording();};
+      mediaRecorder.onstop = processRecording;
+      startTime = Date.now(); startTick = performance.now(); stoppedTick = null;
+      mediaRecorder.start(1000);
+      ui.recordBtn.textContent = '停止'; ui.recordBtn.classList.add('recording'); ui.recordBtn.disabled = false;
+      showStatus('録音中。タップして停止');
+      ui.timer.textContent = '00:00'; timerInterval = setInterval(updateTimer, 500);
+    } catch (error) {
+      stopTracks(); ui.recordBtn.disabled = false;
+      showStatus(error.name === 'NotAllowedError' ? 'マイクを使えません。ブラウザのマイク許可を確認してください。' : error.message, true);
+    }
+  }
+
+  function updateTimer() {
+    const elapsed = Math.floor((performance.now() - startTick) / 1000);
+    ui.timer.textContent = String(Math.floor(elapsed / 60)).padStart(2,'0') + ':' + String(elapsed % 60).padStart(2,'0');
+    if (elapsed >= maxDurationSec && mediaRecorder.state === 'recording') stopRecording();
+  }
+
+  function stopRecording() {
+    if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
+    stoppedTick = performance.now(); clearInterval(timerInterval);
+    ui.recordBtn.disabled = true; ui.recordBtn.classList.remove('recording');
+    showStatus('録音を送信しています…');
+    mediaRecorder.stop();
+  }
+
+  function processRecording() {
+    clearInterval(timerInterval); stopTracks();
+    const mimeType = mediaRecorder.mimeType.split(';')[0];
+    const blob = new Blob(audioChunks, {type: mimeType}); audioChunks = [];
+    if (!blob.size) {
+      showStatus('音声を取得できませんでした。もう一度録音してください。', true);
+      ui.recordBtn.disabled = false; ui.recordBtn.textContent = '録音開始';
+      return;
+    }
+    const durationSec = Math.max(.001, ((stoppedTick || performance.now()) - startTick) / 1000);
+    console.log('録音完了: blob.size=' + blob.size + ' mimeType=' + mimeType + ' durationSec=' + durationSec); // 調査用
+    window.opener.postMessage({
+      type: 'voiceJournalRecording', version: 1,
+      blob: blob, mimeType: mimeType,
+      recordedAt: new Date(startTime).toISOString(),
+      durationSec: durationSec
+    }, targetOrigin);
+    showStatus('送信しました。このウィンドウを閉じます…');
+    ui.recordBtn.hidden = true;
+    setTimeout(() => window.close(), 800);
+  }
+
+  if (!window.opener) {
+    showStatus('録音元の画面と接続できません。音声ジャーナルの画面から開き直してください。', true);
+  } else if (!ALLOWED_ORIGIN_PATTERN.test(targetOrigin)) {
+    showStatus('不正なアクセス元のため利用できません: ' + targetOrigin, true);
+  } else {
+    ui.recordBtn.disabled = false;
+    showStatus('タップして録音開始');
+    ui.recordBtn.addEventListener('click', () => mediaRecorder && mediaRecorder.state === 'recording' ? stopRecording() : startRecording());
+  }
+  window.addEventListener('beforeunload', event => {if (mediaRecorder && mediaRecorder.state === 'recording') {event.preventDefault(); event.returnValue = '';}});
+</script>
+</body>
+</html>
